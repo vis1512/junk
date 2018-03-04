@@ -1,0 +1,97 @@
+#########
+Edit multipath.conf
+# Delete the commented lines in multipath blocks, if there are any .. Otherwise the line number caculation will go wrong.
+#No of lines to be deleted above patterm match = 2 START = NR-"2"
+#No of lines to be deleted pattern match = 4       END = NR+"4"
+#File rmpath contains  old alias names that needs to removed from multipath.conf
+
+   109  keep this text
+   x 110 -2                multipath {
+   x 111 -1                          wwid    360060480000190105156533032344241
+   x 112 0                           alias   asm_disk1
+   x 113 1                           mode    0660
+   x 114 2                           uid     4085
+   x 115 3                           gid     1140
+   x 116 4                }
+   117  keep this too 
+cd /tmp
+ls -l /etc/multipath.conf /etc/jpmc/etc/multipath.conf
+TMP=/tmp/multipath.conf_`date +%m%d%y`_w555800   
+cp /etc/multipath.conf  /tmp/multipath.conf_`date +%m%d%y`_w555800 
+cp /etc/multipath.conf  $TMP
+
+for LUN in `egrep -v '^$|^#' rm_mpath`; do
+    echo -- $LUN block details ----
+    NR=`grep -wn "alias.*$LUN" $TMP | cut -f1 -d:`
+    [ -s $NR ] && echo $LUN not found && continue
+    let START=$NR-2 ; let END=$NR+4
+    awk -v ST=$START -v ED=$END 'NR>=ST && NR<=ED' $TMP
+    perl -pi -e 's/^.*\n$// if ($.>="'$START'" && $.<="'$END'")' $TMP
+done 
+
+mv $TMP /etc/jpmc/etc/multipath.conf
+ls -l /etc/multipath.conf /etc/jpmc/etc/multipath.conf
+
+# Check if everything looks good, this filters comments 
+perl -lne 'print if ! /^\s*(#.*)?$/' /etc/multipath.conf
+
+##########
+Check mount points - 
+for i in `egrep -v '^$|^#' /etc/fstab | awk '{print $2}'` ; do 
+  findmnt -lo source,target | grep -qw $i || echo $i not mounted ; done
+  
+for i in /gccndmdevpri  /gccndmdevpri/isd  /gccndmqapri /gccndmqapri/isd; do df -h | grep -w $i || echo $i not mounted ; done
+/etc/init.d/rpcbind status | grep stopped && /etc/init.d/rpcbind start && service nfslock start 
+
+##########
+Scan for new luns-  
+/usr/sbin/lpfc/lun_scan all || for i in `ls /sys/class/fc_host`; do echo "- - -" > /sys/class/fc_host/${host}/scan ; done
+copy all new lun ids to a file
+TMP=/tmp/newluns_`date +%m%d%y`_w555800
+vi $TMP
+LUNIDS=`egrep -v "^ *(#|$)" $TMP | xargs  | sed 's/ /|/g'`
+inq -nodots  -showvol -sid | egrep "($LUNIDS):" || echo "$LUNDIDS are not available" 
+## old one ->  inq -nodots  -showvol -sid | grep mapper | egrep "($LUNIDS):" | tee >(tr -d : | awk '{count[$7/1024/1014]++;} END { print "Counts:"; for (i in count) printf "%d x %d Gb\n", count[i],i}')
+inq -nodots  -showvol -sid | egrep "dm-|mapper|vx" | egrep "($LUNIDS):" | awk '!seen[$7]++' | tee >(awk '{count[$8/1024/1014]++;} END { print "Counts:"; for (i in count) printf "%2d x %5d Gb\n", count[i],i}')
+
+#######
+Post san-unmasking check 
+LUNS="luns_deleted_`date +%m%d%y`_w555800"
+LUNIDS=`egrep -v "^ *(#|$)" $LUNS | xargs  | sed 's/ /|/g'`
+inq -nodots  -showvol -sid | egrep "($LUNIDS):" && echo "$LUNIDS deletion is not clean" || echo "$LUNDIDS are all gone"
+
+##### 
+######
+#!/usr/bin/bash 
+# Name somescipt 
+cat <<DATA > map
+  /dev/mpath/mpath0  /dev/mapper/mpath15
+  /dev/mpath/mpath1  /dev/mapper/mpath15
+  /dev/mpath/mpath10 /dev/mapper/mpath15
+  /dev/mpath/mpath11 /dev/mapper/mpath15
+  /dev/mpath/mpath12 /dev/mapper/mpath15
+  /dev/mpath/mpath13 /dev/mapper/mpath15
+  /dev/mpath/mpath14 /dev/mapper/mpath15
+  /dev/mpath/mpath2  /dev/mapper/mpath15
+  /dev/mpath/mpath3  /dev/mapper/mpath15
+  /dev/mpath/mpath4  /dev/mapper/mpath15
+  /dev/mpath/mpath5  /dev/mapper/mpath15
+  /dev/mpath/mpath6  /dev/mapper/mpath15
+  /dev/mpath/mpath7  /dev/mapper/mpath15
+  /dev/mpath/mpath8  /dev/mapper/mpath15
+  /dev/mpath/mpath9  /dev/mapper/mpath15
+DATA
+
+cat map | while read SOURCE DEST; do
+   VG=`pvs $SOURCE | tail -1 | awk '{ print $2}'`
+   pvmove $SOURCE $DEST && pvs $SOURCE | tail -1 | awk '{ if ($NF != $(NF-1)) exit 1}' && echo "$PV is messed in `uname -n`" | tee -a ALERT && continue
+   pvs $SOURCE | tail -1 | awk '{ if ($NF == $(NF-1)) exit 0}' && vgreduce $VG $SOURCE
+   pvremove $SOURCE
+done
+
+=====
+at now 
+> echo somescript run started at `date` | mailx -s address@domain.com
+> time sh /path/some/script 
+> eho soemscript is compelted at `date` | mailx -s address@domain.com
+> crtl-d
