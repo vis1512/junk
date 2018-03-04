@@ -95,3 +95,7 @@ at now
 > time sh /path/some/script 
 > eho soemscript is compelted at `date` | mailx -s address@domain.com
 > crtl-d
+####
+PROMPT_COMMAND='' && export PS1='\[\e[1;32m\][\u@\h \W]\$\[\e[0m\] '
+alias cleanconfig="perl -lne 'print if ! /^\s*(#.*)?$/'"
+alias catn="awk '{print NR  $0}'
