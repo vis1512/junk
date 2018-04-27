@@ -1,0 +1,168 @@
+#!/usr/bin/bash
+#set -x
+
+####
+#  Variables and Initial Initial_Checks
+####
+[ -z $1 ] && exit 1
+[ ! -f $1 -o $1 == "" ] && printf "Script ??\n Use $(basename $0) <script> <optional-hostlist>" && exit 1
+SCRIPT_to_RUN=$1 
+[ -z $2 ] && HOSTS_FILE=/crm/cadm/bin/crossreference.txt || HOSTS_FILE=$2
+#[ ! -f $2  -o $2 == "" ] &&  HOSTS_FILE=/crm/cadm/bin/crossreference.txt && HOSTS_FILE=$2
+[ ! -f $HOSTS_FILE ] && printf "$HOSTS_FILE is missing\n" && exit
+[ ! -f $SCRIPT_to_RUN ] && printf "$SCRIPT_to_RUN is missing\n" && exit
+COMMENTS='^#|^ +#|^$|^ $'
+LOG=$(basename $SCRIPT_to_RUN).out
+MAILTEXT=$(basename $SCRIPT_to_RUN).mailtext.out
+cp /dev/null $LOG
+cp /dev/null $MAILTEXT
+EUSR=`/usr/xpg4/bin/id -nu`
+
+[ `dirname $0` == "." ] && PTH=`pwd` || PTH=`dirname $0`
+SCRIPT=$PTH/`basename $0`
+-------
+#!/usr/bin/ksh -x
+echo 'p'>/tmp/cmd
+echo 'p'>>/tmp/cmd
+vxdisk list | grep cds|awk '{print $1}' >disks.out
+for lun in `cat disks.out`
+do
+echo  "$lun "
+group=`vxdisk list $lun |grep group |awk '{print $2}' |cut -d = -f 2`
+diskname=`vxdisk list $lun |grep disk: |awk '{print $2}' |cut -d = -f 2`
+culdev=`vxdisk list $lun |grep udid |awk '{print $2}' |cut -d % -f 5 |cut -c8-11`
+size=`format -f /tmp/cmd $lun | grep backup | tail -1 | awk '{print $7}'`
+echo "$lun" "," "$group" "," "$diskname" "," "$culdev" "," "$size" >>Luninfo.csv
+done
+cat Luninfo.csv
+---------
+#####################################################
+# Program: dup_uid_client.pl
+# Author: Dan Jacques
+# Date: 05/08/08
+# Version: 1.1
+# Purpose: Perl script to find duplicate UID and along with their associated usernames 
+#####################################################
+# Change history:
+#
+# Version  Date    Name Change
+# 1.0      040808  DGJ  First Cut
+# 1.1      022014  DGJ  Remove the entry for the first line invocation of the shell  
+#                       and removed the line that parce out ht NIS accounts
+#
+#####################################################
+
+/usr/bin/perl -F: -walne'$h{$F[2]}.="$F[0] ";END{$h{$_}=~/ ./&&print"$_: $h{$_}"for keys%h}' /etc/passwd 
+----------------
+AD_VER_NEEDED=5.1.1.851
+DA_VER_NEEDED=2.0.2.102
+
+cat <<COMMANDS >aaa.cmds
+do_version_check() {
+   [ "\$1" == "\$2" ] && return 10
+
+   ver1front=\`echo \$1 | cut -d "." -f -1\`
+   ver1back=\`echo \$1 | cut -d "." -f 2-\`
+
+   ver2front=\`echo \$2 | cut -d "." -f -1\`
+   ver2back=\`echo \$2 | cut -d "." -f 2-\`
+
+   if [ "\$ver1front" != "\$1" ] || [ "\$ver2front" != "\$2" ]; then
+       [ "\$ver1front" -gt "\$ver2front" ] && return 11
+       [ "\$ver1front" -lt "\$ver2front" ] && return 9
+
+       [ "\$ver1front" == "\$1" ] || [ -z "\$ver1back" ] && ver1back=0
+       [ "\$ver2front" == "\$2" ] || [ -z "\$ver2back" ] && ver2back=0
+       do_version_check "\$ver1back" "\$ver2back"
+       return \$?
+   else
+        [ "\$1" -gt "\$2" ] && return 11 || return 9
+   fi
+}  
+dainfo | grep Online 1>/dev/null 2>&1 || exit 100;
+adinfo | grep connected 1>/dev/null 2>&1 || exit 101;
+AD_VER=\`adinfo -v | sed 's/[A-z() ]//g' | sed 's/-/./g'\`
+DA_VER=\`dainfo -v | sed 's/[A-z() ]//g' | sed 's/-/./g'\`
+
+do_version_check \$AD_VER $AD_VER_NEEDED 
+[ \$? -eq 9 ] && echo "AD \$AD_VER less than $AD_VER_NEEDED"
+do_version_check \$DA_VER $DA_VER_NEEDED 
+[ \$? -eq 9 ] && echo "DA \$DA_VER less than $DA_VER_NEEDED"
+COMMANDS
+
+ssh -o LogLevel=Error -o Batchmode=yes -o ConnectTimeout=60 -o StrictHostKeyChecking=no ssrv194bw 'bash -s' <aaa.cmds
+
+==========================
+#!/bin/bash
+vercomp () {
+    if [[ $1 == $2 ]]
+    then
+        return 0
+    fi
+    local IFS=.
+    local i ver1=($1) ver2=($2)
+    # fill empty fields in ver1 with zeros
+    for ((i=${#ver1[@]}; i<${#ver2[@]}; i++))
+    do
+        ver1[i]=0
+    done
+    for ((i=0; i<${#ver1[@]}; i++))
+    do
+        if [[ -z ${ver2[i]} ]]
+        then
+            # fill empty fields in ver2 with zeros
+            ver2[i]=0
+        fi
+        if ((10#${ver1[i]} > 10#${ver2[i]}))
+        then
+            return 1
+        fi
+        if ((10#${ver1[i]} < 10#${ver2[i]}))
+        then
+            return 2
+        fi
+    done
+    return 0
+}
+
+
+vercomp $1 $2
+case $? in
+        0) op='=';;
+        1) op='>';;
+        2) op='<';;
+esac
+echo "$1 $op $2"
+
+#######
+do_version_check() {
+
+   [ "$1" == "$2" ] && return 10
+
+   ver1front=`echo $1 | cut -d "." -f -1`
+   ver1back=`echo $1 | cut -d "." -f 2-`
+
+   ver2front=`echo $2 | cut -d "." -f -1`
+   ver2back=`echo $2 | cut -d "." -f 2-`
+
+   if [ "$ver1front" != "$1" ] || [ "$ver2front" != "$2" ]; then
+       [ "$ver1front" -gt "$ver2front" ] && return 11
+       [ "$ver1front" -lt "$ver2front" ] && return 9
+
+       [ "$ver1front" == "$1" ] || [ -z "$ver1back" ] && ver1back=0
+       [ "$ver2front" == "$2" ] || [ -z "$ver2back" ] && ver2back=0
+       do_version_check "$ver1back" "$ver2back"
+       return $?
+   else
+           [ "$1" -gt "$2" ] && return 11 || return 9
+   fi
+}    
+
+do_version_check "$1" "$2"
+case $? in
+        10) op='=';;
+        11) op='>';;
+        12) op='<';;
+esac
+echo "$1 $op $2"
+
