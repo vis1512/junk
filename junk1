@@ -1,0 +1,190 @@
+#!/usr/bin/ksh
+#
+# SCRIPT=generate_lun_replacement_script.ksh
+# copy the luns from ticekt to the newluns file
+#
+# Example of newluns file-
+#DB (mirror one from each group):
+#
+#c10t60002AC0000000000000D3A10000880Ad0s2
+#c10t60002AC0000000000000D3A20000880Ad0s2
+#c10t60002AC0000000000000D3A30000880Ad0s2
+#c10t60002AC0000000000000D3A40000880Ad0s2
+#c10t60002AC0000000000000D3A50000880Ad0s2
+#c10t60002AC0000000000000D3A60000880Ad0s2
+
+#c10t60002AC0000000000000D3A70000880Ad0s2
+#c10t60002AC0000000000000D3A80000880Ad0s2
+#c10t60002AC0000000000000D3A30000880Ad0s2
+#c10t60002AC0000000000000D3AA0000880Ad0s2
+#c10t60002AC0000000000000D3AB0000880Ad0s2
+#c10t60002AC0000000000000D3AC0000880Ad0s2
+#
+#
+#MDisks:
+#
+#c10t60002AC0000000000000D3AD0000880Ad0s2
+#c10t60002AC0000000000000D3AE0000880Ad0s2
+#c10t60002AC0000000000000D3AF0000880Ad0s2
+#c10t60002AC0000000000000D3B00000880Ad0s2
+#
+#
+#Zils:
+#
+#c10t60002AC0000000000000D3B10000880Ad0s2
+#c10t60002AC0000000000000D3B20000880Ad0s2
+#c10t60002AC0000000000000D3B30000880Ad0s2
+#c10t60002AC0000000000000D3B40000880Ad0s2
+
+
+POOL=$1
+OUTPUT_SCRIPT=${POOL}-luns-replace.ksh
+rm  $POOL* *out *pre 2>/dev/null
+
+# Groups luns as per volume.
+# The output files are cog02-DB-NEWLUNS cog-Zils-NEWLUNS so on .
+egrep -v '^ *($|#)' newluns | sed 's/s2$//g; s/://g' > newluns1
+while read line; do
+ echo $line | egrep '^c' &>/dev/null
+ if [ $? -ne 0 ]; then
+  file=`echo $line | awk '{print $1}'`
+  file=`echo ${POOL}-$file-NEWLUNS`
+ else
+  echo $line >> $file
+ fi
+done < newluns1
+
+# Start creating the script.
+cat <<SCRIPT >$OUTPUT_SCRIPT
+#!/usr/bin/bash
+#
+SCRIPT
+
+#####
+# Functions
+#####
+record-pre-status () {
+        echo "Taking backup of echo | format output .."
+        echo | format > format.out
+
+        echo "Taking backup df -h | grep ${POOL} .."
+        df -h | grep ${POOL} > df-h-${POOL}.out
+
+        echo "Taking backup of zpool status output .."
+        zpool status `zpool list | grep ${POOL} | awk '{print $1}'` > zpool-status.pre
+        zpool status > zpool-status-all.pre
+
+        # Create a pool map what lun belongs to which pool.
+        echo "List pool luns map ..."
+        cat zpool-status-all.pre | awk '{if ($1 == "pool:") pool=$2;  printf "%s %s\n", pool, $1}' > lun-pool-map.out
+
+        # Gather old luns info and group them as diffrent files,
+        zpool status ${POOL} | nawk '{if ($1=="logs") exit; if ($1~"^c[0-9]") print $1}' > ${POOL}-DB-OLDLUNS
+        zpool status ${POOL} | sed -n '/logs/,$p' |  nawk '{if ($1~"^c[0-9]") print $1}' > ${POOL}-Zils-OLDLUNS
+        zpool status ${POOL}m1 | nawk '{if ($1~"^c[0-9]") print $1}' > ${POOL}-MDisks1-OLDLUNS
+        zpool status ${POOL}m2 | nawk '{if ($1~"^c[0-9]") print $1}' > ${POOL}-MDisks2-OLDLUNS
+        zpool status a${POOL} | nawk '{if ($1~"^c[0-9]") print $1}' > ${POOL}-ASYNC-OLDLUNS
+}
+
+checks () {
+        # Auto expand should be on
+        echo "Checking auto-expand status on ${POOL} .."
+        for PL in `zpool list | grep ${POOL} | awk '{print $1}'`; do
+          zpool get autoexpand $PL | grep on 1>/dev/null 2>/dev/null
+          [ $? -ne 0 ] && echo "Auto-expand is set to *off* on $PL" && echo "zpool set autoexpand=on $PL; sleep 10" >> $OUTPUT_SCRIPT
+        done
+
+        # Check if the new luns are present and are not being used by any pool.
+        echo "Checking if new luns are seen format output .."
+        for LUN in `egrep ^c newluns1`; do
+           /usr/xpg4/bin/grep -wq  $LUN format.out
+           [ $? -ne 0 ] && echo $LUN is not there in format output && POOL=NULL && exit 1
+        done
+
+        echo "Checking if new luns are being in any pool .."
+        for LUN in `egrep ^c newluns1`; do
+           /usr/xpg4/bin/grep -wq $LUN zpool-status-all.pre
+           [ $? -eq 0 ] && echo $LUN is already in use. && POOL=NULL && exit 1
+        done
+
+        # the number of new luns should be identical to no of luns being replaced.
+#        [ $(nawk 'END {print NR}' *-NEWLUNS) -ne  $(nawk 'END {print NR}' *-OLDLUNS) ] && \
+#        echo "Lun count mismatch" && exit 1
+}
+
+record-pre-status
+checks
+cat ${POOL}-MDisks1-OLDLUNS ${POOL}-MDisks2-OLDLUNS > ${POOL}-MDisks-OLDLUNS
+#for TYPE in ${POOL}-DB ${POOL}-Zils ${POOL}-MDisks ; do
+for TYPE in ${POOL}-DB ${POOL}-Zils ${POOL}-MDisks ; do
+ N=$(nawk 'END {print NR}' $TYPE-OLDLUNS)
+ C=1
+ printf "Old lun(s) will be replaced by new lun(s) in $TYPE..\n"
+ while [ $C -le $N ]; do
+   OLUN=$(nawk 'NR=="'$C'"{print}' $TYPE-OLDLUNS)
+   [ `expr $C % 2` -eq 0 ] && NNUM=`echo "($C/2)+($N/2)" | bc` || NNUM=`echo "($C-1)/2 +1" | bc`
+   NLUN=$(nawk 'NR=="'$NNUM'"{print}' $TYPE-NEWLUNS)
+   OLUNSIZE=$(iostat -En $OLUN | nawk '$1~/^c/ {getline ; getline; print $2}')
+   NLUNSIZE=$(iostat -En $NLUN | nawk '$1~/^c/ {getline ; getline; print $2}')
+   LP=`grep $OLUN lun-pool-map.out | cut -d' ' -f1`
+   echo "($LP - $C of $N): Old $OLUN ($OLUNSIZE) : New $NLUN ($NLUNSIZE)"
+#   echo "zpool replace $LP $OLUN $NLUN"
+   if [ $C -eq 1 ]; then
+    echo "echo \"\`date +'%x %r %Z'\` ($LP - $C of $N) $OLUN ($OLUNSIZE) is being replacedby $NLUN ($NLUNSIZE)\"" >> $OUTPUT_SCRIPT
+    echo "zpool replace $LP $OLUN $NLUN" >> $OUTPUT_SCRIPT
+    let C=$C+1
+    continue
+   fi
+  echo >> $OUTPUT_SCRIPT
+  WAIT=`echo $OLUNSIZE| awk -FGB '{printf "%d", $1*1.5}'`
+
+cat - <<SCRIPT >>$OUTPUT_SCRIPT
+while true ; do
+sleep 300 ;
+zpool status $LP | grep % 1>/dev/null 2>/dev/null
+if [ \$? -ne 0 ] ; then
+ sleep $WAIT;
+ echo "\`date +'%x %r %Z'\` ($LP - $C of $N) $OLUN ($OLUNSIZE) is being replacedby $NLUN ($NLUNSIZE)"
+ zpool replace $LP $OLUN $NLUN
+ break
+fi
+done
+SCRIPT
+
+
+   let C=$C+1
+  done
+done
+
+
+
+cat - <<SCRIPT >>$OUTPUT_SCRIPT
+while true ; do
+sleep 300 ;
+zpool status $LP | grep % 1>/dev/null 2>/dev/null
+if [ \$? -ne 0 ] ; then
+ (echo "Please reclaim the below luns in storage"; echo; echo;
+  for TYPE in ${POOL}-DB ${POOL}-Zils ${POOL}-MDisks ; do
+  echo "$TYPE-OLDLUNS -"; cat $TYPE-OLDLUNS; done) | \
+  mailx -s "`hostname`: Reclaim these luns" viswanadh.mandapati@te.com
+ break
+fi
+done
+SCRIPT
+
+chmod +x $OUTPUT_SCRIPT
+cat - <<FINAL
+
+
+Output script is $OUTPUT_SCRIPT
+Run the above script as below
+# `hostname` # at now
+# at> `pwd`/$OUTPUT_SCRIPT >`pwd`/$OUTPUT_SCRIPT-runnning.out 2>&1
+# at> <ctrl><d>
+# `hostname` #
+# `hostname` # tail -f `pwd`/$OUTPUT_SCRIPT-runnning.out
+Or monitor from ssrv194bw,
+# ssrv194bw # ssh `hostname` tail -f `pwd`/$OUTPUT_SCRIPT-runnning.out
+FINAL
+
+
